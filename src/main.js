@@ -47,9 +47,14 @@ app.innerHTML = `
               <button class="provider-option is-selected" type="button" role="radio" aria-checked="true" data-provider="openai">OpenAI</button>
             </div>
             <div id="openai-key-config" class="api-key-config" hidden>
-              <label for="openai-api-key">OpenAI API key <span>Session only</span></label>
+              <label for="openai-api-key">OpenAI API key <span>Optional override</span></label>
               <input id="openai-api-key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…" />
-              <small>The key is sent only to this app's server for the OCR request and is not saved.</small>
+              <small>Enter a key to use it for this session, or leave blank to use the server key.</small>
+            </div>
+            <div id="regula-key-config" class="api-key-config" hidden>
+              <label for="regula-license-key">Regula license key <span>Optional override</span></label>
+              <input id="regula-license-key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste Base64 license" />
+              <small>Enter a license to use it for this session, or leave blank to use VITE_REGULA_LICENSE.</small>
             </div>
           </div>
         </section>
@@ -68,6 +73,7 @@ app.innerHTML = `
 
             <div id="reader-frame" class="reader-frame" aria-busy="true">
               <input id="openai-file" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+              <input id="regula-file" type="file" accept="image/jpeg,image/png,image/webp" hidden />
               <input id="openai-camera-file" type="file" accept="image/*" capture="environment" hidden />
               <canvas id="camera-canvas" hidden></canvas>
               <document-reader
@@ -89,6 +95,10 @@ app.innerHTML = `
               </div>
               <div id="openai-camera" class="openai-camera" hidden>
                 <video id="openai-camera-video" autoplay playsinline muted></video>
+                <label id="camera-device-picker" class="camera-device-picker" hidden>
+                  Camera
+                  <select id="camera-device-select" aria-label="Select camera"></select>
+                </label>
                 <div class="camera-guide" aria-hidden="true"></div>
                 <div class="camera-controls">
                   <button id="cancel-camera" class="camera-cancel" type="button">Cancel</button>
@@ -191,7 +201,10 @@ const reopenReaderButton = document.querySelector('#reopen-reader');
 const providerOptions = document.querySelectorAll('.provider-option');
 const openaiKeyConfig = document.querySelector('#openai-key-config');
 const openaiApiKeyInput = document.querySelector('#openai-api-key');
+const regulaKeyConfig = document.querySelector('#regula-key-config');
+const regulaLicenseInput = document.querySelector('#regula-license-key');
 const openaiFileInput = document.querySelector('#openai-file');
+const regulaFileInput = document.querySelector('#regula-file');
 const openaiCameraFileInput = document.querySelector('#openai-camera-file');
 const documentPreview = document.querySelector('#document-preview');
 const documentPreviewImage = document.querySelector('#document-preview-image');
@@ -202,6 +215,8 @@ const processingMessage = document.querySelector('#processing-message');
 const openaiCameraButton = document.querySelector('#openai-camera-button');
 const openaiCamera = document.querySelector('#openai-camera');
 const openaiCameraVideo = document.querySelector('#openai-camera-video');
+const cameraDevicePicker = document.querySelector('#camera-device-picker');
+const cameraDeviceSelect = document.querySelector('#camera-device-select');
 const cameraCanvas = document.querySelector('#camera-canvas');
 const captureCameraButton = document.querySelector('#capture-camera');
 const cancelCameraButton = document.querySelector('#cancel-camera');
@@ -213,6 +228,8 @@ let regulaReady = false;
 let openaiPricing = null;
 let openaiCameraStream = null;
 let serverApiKeyConfigured = true;
+let availableCameraDevices = [];
+let activeRegulaLicense = '';
 
 function resetResults() {
   setProcessing(false);
@@ -252,28 +269,130 @@ function setProcessing(isProcessing, message = 'Extracting identity details…')
 }
 
 function updateApiKeyVisibility() {
-  openaiKeyConfig.hidden = activeProvider !== 'openai' || serverApiKeyConfigured;
+  openaiKeyConfig.hidden = activeProvider !== 'openai';
+  regulaKeyConfig.hidden = activeProvider !== 'regula';
 }
 
 function hasOpenAICredentials() {
-  if (serverApiKeyConfigured || openaiApiKeyInput.value.trim()) return true;
+  if (openaiApiKeyInput.value.trim() || serverApiKeyConfigured) return true;
   openaiKeyConfig.hidden = false;
   openaiApiKeyInput.focus();
   setNotice('error', 'OpenAI API key required', 'Enter an API key above to process this document. It will be used for this session only.');
   return false;
 }
 
-function stopOpenAICamera(showPlaceholder = true) {
+function releaseOpenAICameraStream() {
   openaiCameraStream?.getTracks().forEach((track) => track.stop());
   openaiCameraStream = null;
+  openaiCameraVideo.pause();
   openaiCameraVideo.srcObject = null;
+}
+
+function stopOpenAICamera(showPlaceholder = true) {
+  releaseOpenAICameraStream();
   openaiCamera.hidden = true;
   readerFrame.classList.remove('is-camera-open');
   if (showPlaceholder && activeProvider === 'openai') readerPlaceholder.hidden = false;
 }
 
+function waitForCameraFrame(video, timeoutMs = 6000) {
+  return new Promise((resolve, reject) => {
+    const startedAt = performance.now();
+
+    const checkFrame = () => {
+      const hasFrame = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.videoWidth > 0
+        && video.videoHeight > 0;
+      if (hasFrame) {
+        resolve();
+        return;
+      }
+      if (performance.now() - startedAt >= timeoutMs) {
+        reject(new DOMException('The camera did not provide a video frame.', 'NotReadableError'));
+        return;
+      }
+      requestAnimationFrame(checkFrame);
+    };
+
+    checkFrame();
+  });
+}
+
+async function connectOpenAICamera(videoConstraints) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: videoConstraints,
+  });
+
+  try {
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack || videoTrack.readyState !== 'live') {
+      throw new DOMException('The camera video track is not live.', 'NotReadableError');
+    }
+    openaiCameraVideo.muted = true;
+    openaiCameraVideo.playsInline = true;
+    openaiCameraVideo.srcObject = stream;
+    await openaiCameraVideo.play();
+    await waitForCameraFrame(openaiCameraVideo);
+    return stream;
+  } catch (error) {
+    stream.getTracks().forEach((track) => track.stop());
+    openaiCameraVideo.pause();
+    openaiCameraVideo.srcObject = null;
+    throw error;
+  }
+}
+
+function cameraPreferenceScore(device) {
+  const label = device.label.toLowerCase();
+  let score = 0;
+  if (/back|rear|environment/.test(label)) score += 80;
+  if (/integrated|webcam|usb camera|facetime/.test(label)) score += 50;
+  if (/virtual|screen|transscreen|obs|ndi|snap|camo|epoc/.test(label)) score -= 200;
+  return score;
+}
+
+async function discoverCameraDevices() {
+  const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+  permissionStream.getTracks().forEach((track) => track.stop());
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices
+    .filter((device) => device.kind === 'videoinput')
+    .sort((left, right) => cameraPreferenceScore(right) - cameraPreferenceScore(left));
+}
+
+function renderCameraDevices(devices, selectedDeviceId = '') {
+  cameraDeviceSelect.replaceChildren();
+  devices.forEach((device, index) => {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || `Camera ${index + 1}`;
+    option.selected = device.deviceId === selectedDeviceId;
+    cameraDeviceSelect.append(option);
+  });
+  cameraDevicePicker.hidden = devices.length < 2;
+}
+
+async function connectFirstWorkingCamera(devices) {
+  let lastError = null;
+  const candidates = devices.length ? devices : [null];
+  for (const device of candidates) {
+    try {
+      const constraints = device?.deviceId
+        ? { deviceId: { exact: device.deviceId } }
+        : true;
+      const stream = await connectOpenAICamera(constraints);
+      renderCameraDevices(devices, device?.deviceId || '');
+      return stream;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new DOMException('No working camera was found.', 'NotFoundError');
+}
+
 async function startOpenAICamera() {
-  if (!hasOpenAICredentials()) return;
+  if (activeProvider === 'openai' && !hasOpenAICredentials()) return;
   nativeCameraButton.hidden = true;
   if (!window.isSecureContext) {
     nativeCameraButton.hidden = false;
@@ -288,21 +407,15 @@ async function startOpenAICamera() {
 
   try {
     openaiCameraButton.disabled = true;
+    captureCameraButton.disabled = true;
     resetResults();
     readerPlaceholder.hidden = true;
     openaiCamera.hidden = false;
     readerFrame.classList.add('is-camera-open');
-    try {
-      openaiCameraStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { ideal: 'environment' } },
-      });
-    } catch (firstError) {
-      if (!['OverconstrainedError', 'NotFoundError', 'DevicesNotFoundError'].includes(firstError?.name)) throw firstError;
-      openaiCameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
-    }
-    openaiCameraVideo.srcObject = openaiCameraStream;
-    await openaiCameraVideo.play();
+    setNotice('', 'Starting camera', 'Allow camera access if prompted. The preview will appear here.');
+    availableCameraDevices = await discoverCameraDevices();
+    openaiCameraStream = await connectFirstWorkingCamera(availableCameraDevices);
+    captureCameraButton.disabled = false;
     nativeCameraButton.hidden = true;
     setNotice('ready', 'Camera ready', 'Place the document inside the frame, then press the capture button.');
   } catch (error) {
@@ -334,9 +447,10 @@ async function startOpenAICamera() {
 }
 
 async function captureOpenAIPhoto() {
+  const activeTrack = openaiCameraStream?.getVideoTracks?.()[0];
   const width = openaiCameraVideo.videoWidth;
   const height = openaiCameraVideo.videoHeight;
-  if (!width || !height) {
+  if (!activeTrack || activeTrack.readyState !== 'live' || openaiCameraVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !width || !height) {
     setNotice('error', 'Camera is still starting', 'Wait a moment, then capture the document again.');
     return;
   }
@@ -352,7 +466,8 @@ async function captureOpenAIPhoto() {
 
   stopOpenAICamera(false);
   const photoFile = new File([photoBlob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
-  await processWithOpenAI(photoFile);
+  if (activeProvider === 'openai') await processWithOpenAI(photoFile);
+  else await processWithRegula(photoFile);
 }
 
 function setPlaceholder(title, message, buttonLabel, hint) {
@@ -388,17 +503,17 @@ function selectProvider(provider) {
     setNotice('', 'OpenAI OCR selected', 'Upload a document image to extract its identity details.');
     dataNote.lastChild.textContent = ' Document image is sent to OpenAI for extraction';
   } else {
-    openaiCameraButton.hidden = true;
+    openaiCameraButton.hidden = false;
     nativeCameraButton.hidden = true;
-    readerComponent.hidden = false;
-    reopenReaderButton.disabled = true;
+    readerComponent.hidden = true;
+    readerPlaceholder.hidden = false;
+    reopenReaderButton.disabled = false;
     dataNote.lastChild.textContent = ' Your data is processed securely in your browser';
     if (regulaReady) {
-      readerPlaceholder.hidden = true;
-      setNotice('ready', 'Ready to scan', 'Select an ID card or driving license to begin.');
+      setPlaceholder('Choose your document', 'Regula will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+      setNotice('ready', 'Regula OCR selected', 'Upload or capture a document image to extract its identity details.');
     } else {
-      readerPlaceholder.hidden = false;
-      setPlaceholder('Choose your document', 'Upload an identity card or driving license', 'Select document', 'JPG, PNG or PDF · Maximum 10 MB');
+      setPlaceholder('Choose your document', 'A Regula license is required before processing', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
       setNotice('error', 'Document reader needs a license', 'Add VITE_REGULA_LICENSE to a local .env file, or configure domain licensing for this host.');
     }
   }
@@ -624,6 +739,38 @@ async function processWithOpenAI(file) {
   }
 }
 
+async function processWithRegula(file) {
+  if (!file) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    setNotice('error', 'Unsupported file type', 'Regula mode accepts JPG, PNG, or WebP images.');
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    setNotice('error', 'File is too large', 'Choose an image smaller than 10 MB.');
+    return;
+  }
+
+  try {
+    resetResults();
+    const imageDataUrl = await fileToDataUrl(file);
+    showDocumentPreview(imageDataUrl, file.name);
+    if (!regulaReady || !window.RegulaDocumentSDK) {
+      setNotice('error', 'Regula license required', 'The image was loaded, but Regula cannot process it until VITE_REGULA_LICENSE is configured.');
+      return;
+    }
+    setProcessing(true, 'Regula is reading the selected image…');
+    setNotice('', 'Reading with Regula', 'Keep this page open while the image is processed.');
+    const response = await window.RegulaDocumentSDK.processImage([await file.arrayBuffer()]);
+    showResults(response);
+  } catch (error) {
+    console.error('Regula image processing failed:', error);
+    setNotice('error', 'Regula OCR failed', 'Try a clearer image with all four corners visible.');
+  } finally {
+    setProcessing(false);
+    regulaFileInput.value = '';
+  }
+}
+
 async function initializeReader() {
   try {
     window.RegulaDocumentSDK = new DocumentReaderService();
@@ -639,14 +786,22 @@ async function initializeReader() {
     readerFrame.setAttribute('aria-busy', 'false');
     readerFrame.classList.add('is-ready');
     if (activeProvider === 'regula') {
-      readerPlaceholder.hidden = true;
-      setNotice('ready', 'Ready to scan', 'Select an ID card or driving license to begin.');
+      readerComponent.hidden = true;
+      readerPlaceholder.hidden = false;
+      reopenReaderButton.disabled = false;
+      openaiCameraButton.hidden = false;
+      setPlaceholder('Choose your document', 'Regula will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+      setNotice('ready', 'Regula OCR selected', 'Upload or capture a document image to extract its identity details.');
     }
   } catch (error) {
     console.error('Regula initialization failed:', error);
     readerFrame.setAttribute('aria-busy', 'false');
     readerFrame.classList.add('has-error');
     if (activeProvider === 'regula') {
+      readerComponent.hidden = true;
+      readerPlaceholder.hidden = false;
+      reopenReaderButton.disabled = false;
+      openaiCameraButton.hidden = false;
       setNotice('error', 'Document reader needs a license', 'Add VITE_REGULA_LICENSE to a local .env file, or configure domain licensing for this host.');
     }
   }
@@ -690,32 +845,58 @@ reopenReaderButton.addEventListener('click', () => {
   if (activeProvider === 'openai') {
     if (hasOpenAICredentials()) openaiFileInput.click();
   }
-  else openReader();
+  else regulaFileInput.click();
 });
 
 changeDocumentButton.addEventListener('click', () => {
-  clearDocumentPreview();
+  stopOpenAICamera(false);
+  resetResults();
+  readerComponent.hidden = true;
+  readerPlaceholder.hidden = false;
   if (activeProvider === 'openai') {
-    readerPlaceholder.hidden = false;
-    if (hasOpenAICredentials()) openaiFileInput.click();
+    setPlaceholder('Choose your document', 'OpenAI will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+    setNotice('', 'OpenAI OCR selected', 'Upload or capture a document image when you’re ready.');
   } else {
-    openReader();
+    if (regulaReady) {
+      setPlaceholder('Choose your document', 'Regula will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+      setNotice('ready', 'Regula OCR selected', 'Upload or capture a document image when you’re ready.');
+    } else {
+      setPlaceholder('Choose your document', 'A Regula license is required before processing', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+      setNotice('error', 'Document reader needs a license', 'You can choose an image first; the license error will appear after it loads.');
+    }
   }
 });
 
 openaiCameraButton.addEventListener('click', startOpenAICamera);
 nativeCameraButton.addEventListener('click', () => openaiCameraFileInput.click());
 captureCameraButton.addEventListener('click', captureOpenAIPhoto);
+cameraDeviceSelect.addEventListener('change', async () => {
+  const selectedDevice = availableCameraDevices.find((device) => device.deviceId === cameraDeviceSelect.value);
+  if (!selectedDevice) return;
+  captureCameraButton.disabled = true;
+  setNotice('', 'Switching camera', `Starting ${selectedDevice.label || 'the selected camera'}…`);
+  releaseOpenAICameraStream();
+  try {
+    openaiCameraStream = await connectOpenAICamera({ deviceId: { exact: selectedDevice.deviceId } });
+    captureCameraButton.disabled = false;
+    setNotice('ready', 'Camera ready', `${selectedDevice.label || 'Selected camera'} is active.`);
+  } catch (error) {
+    nativeCameraButton.hidden = false;
+    setNotice('error', 'Selected camera unavailable', 'Choose another camera or use the device-camera option.');
+  }
+});
 cancelCameraButton.addEventListener('click', () => {
   stopOpenAICamera();
   setNotice('', 'Camera closed', 'Capture a photo or upload a document image when you’re ready.');
 });
 
 openaiFileInput.addEventListener('change', () => processWithOpenAI(openaiFileInput.files?.[0]));
+regulaFileInput.addEventListener('change', () => processWithRegula(regulaFileInput.files?.[0]));
 openaiCameraFileInput.addEventListener('change', () => {
   const file = openaiCameraFileInput.files?.[0];
   openaiCameraFileInput.value = '';
-  processWithOpenAI(file);
+  if (activeProvider === 'openai') processWithOpenAI(file);
+  else processWithRegula(file);
 });
 
 confirmButton.addEventListener('click', () => {
@@ -735,7 +916,8 @@ startOverButton.addEventListener('click', () => {
     readerPlaceholder.hidden = false;
     setNotice('', 'OpenAI OCR selected', 'Upload another document image when you’re ready.');
   } else {
-    setNotice('ready', 'Ready to scan', 'Select an ID card or driving license to begin.');
+    readerPlaceholder.hidden = false;
+    setNotice('ready', 'Regula OCR selected', 'Upload or capture another document image when you’re ready.');
   }
 });
 

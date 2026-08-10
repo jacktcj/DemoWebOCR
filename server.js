@@ -77,7 +77,7 @@ app.get('/api/openai-pricing', (_request, response) => {
 app.post('/api/openai-ocr', async (request, response) => {
   const serverApiKey = process.env.OPENAI_API_KEY?.trim();
   const requestApiKey = request.get('x-openai-api-key')?.trim();
-  const apiKey = serverApiKey || requestApiKey;
+  const apiKey = requestApiKey || serverApiKey;
   const { imageDataUrl } = request.body || {};
 
   if (!apiKey) {
@@ -86,7 +86,7 @@ app.post('/api/openai-ocr', async (request, response) => {
     });
   }
 
-  if (!serverApiKey && apiKey.length > 512) {
+  if (requestApiKey && requestApiKey.length > 512) {
     return response.status(400).json({ error: 'The supplied OpenAI API key is invalid.' });
   }
 
