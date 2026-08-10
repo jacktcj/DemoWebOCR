@@ -17,6 +17,18 @@ A responsive browser interface for uploading an identity card or driving license
 
 The Regula camera flow requires HTTPS in production. `localhost` is treated as a secure context by modern browsers.
 
+## Host in production
+
+This project requires its Node/Express server for OpenAI OCR. Configure the hosting service to run:
+
+```bash
+npm install
+npm run build
+npm start
+```
+
+Do not deploy only the `dist` folder: static hosting has no `/api/openai-ocr` endpoint. When `.env` or `OPENAI_API_KEY` is absent, users can enter a session-only key in OpenAI mode; that key is sent to the Node endpoint for the request and is not saved.
+
 ## Integration notes
 
 - The page initializes `DocumentReaderService` with the `FullProcess` scenario.

@@ -76,7 +76,8 @@ app.get('/api/openai-pricing', (_request, response) => {
 
 app.post('/api/openai-ocr', async (request, response) => {
   const serverApiKey = process.env.OPENAI_API_KEY?.trim();
-  const requestApiKey = request.get('x-openai-api-key')?.trim();
+  const bodyApiKey = typeof request.body?.apiKey === 'string' ? request.body.apiKey.trim() : '';
+  const requestApiKey = bodyApiKey || request.get('x-openai-api-key')?.trim();
   const apiKey = requestApiKey || serverApiKey;
   const { imageDataUrl } = request.body || {};
 

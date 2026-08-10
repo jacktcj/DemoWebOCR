@@ -227,7 +227,7 @@ let activeProvider = 'openai';
 let regulaReady = false;
 let openaiPricing = null;
 let openaiCameraStream = null;
-let serverApiKeyConfigured = true;
+let serverApiKeyConfigured = false;
 let availableCameraDevices = [];
 let activeRegulaLicense = '';
 
@@ -709,19 +709,23 @@ async function processWithOpenAI(file) {
 
     let response;
     try {
+      const manualApiKey = openaiApiKeyInput.value.trim();
       response = await fetch('/api/openai-ocr', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(openaiApiKeyInput.value.trim() ? { 'X-OpenAI-API-Key': openaiApiKeyInput.value.trim() } : {}),
+          ...(manualApiKey ? { 'X-OpenAI-API-Key': manualApiKey } : {}),
         },
-        body: JSON.stringify({ imageDataUrl }),
+        body: JSON.stringify({ imageDataUrl, ...(manualApiKey ? { apiKey: manualApiKey } : {}) }),
       });
     } catch {
       throw new Error('The OCR server is unavailable. Refresh the page and try again.');
     }
 
     const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('The OCR backend is not deployed. Host the Node server with `npm start`; serving only the dist folder cannot run OpenAI OCR.');
+    }
     const payload = contentType.includes('application/json')
       ? await response.json()
       : { error: 'The OCR server returned an invalid response.' };
