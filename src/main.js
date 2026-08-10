@@ -4,6 +4,7 @@ import {
   GraphicFieldType,
   TextFieldType,
 } from '@regulaforensics/vp-frontend-document-components';
+import OpenAI from 'openai';
 import './styles.css';
 
 const app = document.querySelector('#app');
@@ -49,7 +50,7 @@ app.innerHTML = `
             <div id="openai-key-config" class="api-key-config" hidden>
               <label for="openai-api-key">OpenAI API key <span>Optional override</span></label>
               <input id="openai-api-key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…" />
-              <small>Enter a key to use it for this session, or leave blank to use the server key.</small>
+              <small>Enter a key to use it for this session. On static hosting it is sent directly to OpenAI and is not saved; leave blank to use the server key.</small>
             </div>
             <div id="regula-key-config" class="api-key-config" hidden>
               <label for="regula-license-key">Regula license key <span>Optional override</span></label>
@@ -230,6 +231,15 @@ let openaiCameraStream = null;
 let serverApiKeyConfigured = false;
 let availableCameraDevices = [];
 let activeRegulaLicense = '';
+
+const defaultOpenAIPricing = {
+  model: 'gpt-5.6-luna',
+  inputUsdPerMillion: 1,
+  cachedInputUsdPerMillion: 0.1,
+  outputUsdPerMillion: 6,
+  usdToMyr: 4.0651,
+  configured: true,
+};
 
 function resetResults() {
   setProcessing(false);
@@ -649,13 +659,17 @@ function renderUsageSummary(usage = null) {
 async function loadOpenAIPricing() {
   try {
     const response = await fetch('/api/openai-pricing');
-    if (!response.ok) return;
+    const contentType = response.headers.get('content-type') || '';
+    if (!response.ok || !contentType.includes('application/json')) throw new Error('Pricing backend unavailable');
     openaiPricing = await response.json();
     serverApiKeyConfigured = Boolean(openaiPricing.apiKeyConfigured);
     updateApiKeyVisibility();
     if (activeProvider === 'openai') renderUsageSummary();
   } catch {
-    openaiPricing = null;
+    openaiPricing = defaultOpenAIPricing;
+    serverApiKeyConfigured = false;
+    updateApiKeyVisibility();
+    if (activeProvider === 'openai') renderUsageSummary();
   }
 }
 
@@ -686,6 +700,118 @@ function fileToDataUrl(file) {
   });
 }
 
+function summarizeOpenAIUsage(result) {
+  const pricing = openaiPricing || defaultOpenAIPricing;
+  const inputTokens = Number(result.usage?.input_tokens) || 0;
+  const cachedInputTokens = Number(result.usage?.input_tokens_details?.cached_tokens) || 0;
+  const outputTokens = Number(result.usage?.output_tokens) || 0;
+  const reasoningTokens = Number(result.usage?.output_tokens_details?.reasoning_tokens) || 0;
+  const totalTokens = Number(result.usage?.total_tokens) || inputTokens + outputTokens;
+  const pricingConfigured = Boolean(
+    pricing.inputUsdPerMillion && pricing.outputUsdPerMillion && pricing.usdToMyr,
+  );
+  let estimatedCostUsd = null;
+  let estimatedCostMyr = null;
+
+  if (pricingConfigured) {
+    const uncachedInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+    estimatedCostUsd = (uncachedInputTokens / 1_000_000) * pricing.inputUsdPerMillion
+      + (cachedInputTokens / 1_000_000)
+        * (pricing.cachedInputUsdPerMillion || pricing.inputUsdPerMillion)
+      + (outputTokens / 1_000_000) * pricing.outputUsdPerMillion;
+    estimatedCostMyr = estimatedCostUsd * pricing.usdToMyr;
+  }
+
+  return {
+    model: result.model || pricing.model,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningTokens,
+    totalTokens,
+    estimatedCostUsd,
+    estimatedCostMyr,
+    pricingConfigured,
+    pricing,
+  };
+}
+
+async function processOpenAIDirectly(imageDataUrl, apiKey) {
+  const openai = new OpenAI({
+    apiKey,
+    dangerouslyAllowBrowser: true,
+    timeout: 45_000,
+    maxRetries: 1,
+  });
+  const result = await openai.responses.create({
+    model: openaiPricing?.model || defaultOpenAIPricing.model,
+    reasoning: { effort: 'none' },
+    store: false,
+    input: [{
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'Read this identity card or driving license. Return the holder full name and the primary identity, personal, or document number exactly as printed. Use empty strings when a value cannot be read.',
+        },
+        { type: 'input_image', image_url: imageDataUrl, detail: 'high' },
+      ],
+    }],
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'identity_document',
+        strict: true,
+        schema: {
+          type: 'object',
+          properties: {
+            full_name: { type: 'string' },
+            identity_number: { type: 'string' },
+            document_type: { type: 'string' },
+          },
+          required: ['full_name', 'identity_number', 'document_type'],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+  const extracted = JSON.parse(result.output_text);
+  return {
+    name: extracted.full_name,
+    identityNumber: extracted.identity_number,
+    documentType: extracted.document_type,
+    usage: summarizeOpenAIUsage(result),
+  };
+}
+
+async function requestOpenAIOCR(imageDataUrl, manualApiKey) {
+  let response;
+  try {
+    response = await fetch('/api/openai-ocr', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(manualApiKey ? { 'X-OpenAI-API-Key': manualApiKey } : {}),
+      },
+      body: JSON.stringify({ imageDataUrl, ...(manualApiKey ? { apiKey: manualApiKey } : {}) }),
+    });
+  } catch {
+    if (manualApiKey) return processOpenAIDirectly(imageDataUrl, manualApiKey);
+    throw new Error('The OCR backend is unavailable. Enter an OpenAI API key above or deploy the Node server with `npm start`.');
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  const backendUnavailable = response.status === 404 || !contentType.includes('application/json');
+  if (backendUnavailable) {
+    if (manualApiKey) return processOpenAIDirectly(imageDataUrl, manualApiKey);
+    throw new Error('The OCR backend is not deployed. Enter an OpenAI API key above or host the Node server with `npm start`.');
+  }
+
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'OpenAI OCR failed.');
+  return payload;
+}
+
 async function processWithOpenAI(file) {
   if (!file) return;
   if (!hasOpenAICredentials()) return;
@@ -707,29 +833,8 @@ async function processWithOpenAI(file) {
     setPlaceholder('Reading your document', 'OpenAI is extracting the identity details', 'Processing…', file.name);
     setNotice('', 'Reading with OpenAI', 'Keep this page open while the image is processed.');
 
-    let response;
-    try {
-      const manualApiKey = openaiApiKeyInput.value.trim();
-      response = await fetch('/api/openai-ocr', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(manualApiKey ? { 'X-OpenAI-API-Key': manualApiKey } : {}),
-        },
-        body: JSON.stringify({ imageDataUrl, ...(manualApiKey ? { apiKey: manualApiKey } : {}) }),
-      });
-    } catch {
-      throw new Error('The OCR server is unavailable. Refresh the page and try again.');
-    }
-
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      throw new Error('The OCR backend is not deployed. Host the Node server with `npm start`; serving only the dist folder cannot run OpenAI OCR.');
-    }
-    const payload = contentType.includes('application/json')
-      ? await response.json()
-      : { error: 'The OCR server returned an invalid response.' };
-    if (!response.ok) throw new Error(payload.error || 'OpenAI OCR failed.');
+    const manualApiKey = openaiApiKeyInput.value.trim();
+    const payload = await requestOpenAIOCR(imageDataUrl, manualApiKey);
 
     showIdentityResults(payload.name || '', payload.identityNumber || '', payload.usage || null);
     setPlaceholder('Choose another document', 'Upload a new image to replace these results', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');

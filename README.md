@@ -19,7 +19,7 @@ The Regula camera flow requires HTTPS in production. `localhost` is treated as a
 
 ## Host in production
 
-This project requires its Node/Express server for OpenAI OCR. Configure the hosting service to run:
+The recommended production setup uses the Node/Express server so the OpenAI key stays private. Configure the hosting service to run:
 
 ```bash
 npm install
@@ -27,13 +27,13 @@ npm run build
 npm start
 ```
 
-Do not deploy only the `dist` folder: static hosting has no `/api/openai-ocr` endpoint. When `.env` or `OPENAI_API_KEY` is absent, users can enter a session-only key in OpenAI mode; that key is sent to the Node endpoint for the request and is not saved.
+If the host serves only the `dist` folder, users can still enter a session-only OpenAI key. When the app detects that `/api/openai-ocr` is absent, it sends the image and typed key directly from the browser to OpenAI. The key is not saved, but it is available to the page runtime, so use this fallback only on a trusted deployment with a temporary or restricted key.
 
 ## Integration notes
 
 - The page initializes `DocumentReaderService` with the `FullProcess` scenario.
 - Results are handled from the component's `PROCESS_FINISHED` event.
-- OpenAI mode sends JPG, PNG, or WebP images through the same-origin `/api/openai-ocr` server endpoint and uses `gpt-5.6-luna` with reasoning disabled for low-latency extraction.
+- OpenAI mode prefers the same-origin `/api/openai-ocr` server endpoint. On static-only hosting, a manually entered session key enables a direct browser-to-OpenAI fallback. Both paths use `gpt-5.6-luna` with reasoning disabled for low-latency extraction.
 - Each successful OpenAI scan displays input, output, and total tokens plus that process's estimated price in MYR and USD, formatted to four decimal places. The example configuration contains the standard GPT-5.6 Luna token rates and a dated USD/MYR reference rate; review both when pricing changes.
 - Extracted fields remain editable so the user can correct OCR results before confirming.
 - Real Regula license values are excluded by `.gitignore` and should never be committed.
