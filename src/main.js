@@ -713,7 +713,7 @@ async function processWithOpenAI(file) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(serverApiKeyConfigured ? {} : { 'X-OpenAI-API-Key': openaiApiKeyInput.value.trim() }),
+          ...(openaiApiKeyInput.value.trim() ? { 'X-OpenAI-API-Key': openaiApiKeyInput.value.trim() } : {}),
         },
         body: JSON.stringify({ imageDataUrl }),
       });
@@ -754,9 +754,20 @@ async function processWithRegula(file) {
     resetResults();
     const imageDataUrl = await fileToDataUrl(file);
     showDocumentPreview(imageDataUrl, file.name);
-    if (!regulaReady || !window.RegulaDocumentSDK) {
-      setNotice('error', 'Regula license required', 'The image was loaded, but Regula cannot process it until VITE_REGULA_LICENSE is configured.');
+    const manualLicense = regulaLicenseInput.value.trim();
+    const configuredLicense = import.meta.env.VITE_REGULA_LICENSE?.trim() || '';
+    const requestedLicense = manualLicense || configuredLicense;
+    if (!requestedLicense) {
+      setNotice('error', 'Regula license required', 'Enter a Regula license above or configure VITE_REGULA_LICENSE.');
       return;
+    }
+    if (!regulaReady || !window.RegulaDocumentSDK || activeRegulaLicense !== requestedLicense) {
+      setProcessing(true, 'Initializing Regula with the selected license…');
+      const initialized = await initializeReader(manualLicense, false);
+      if (!initialized) {
+        setNotice('error', 'Regula license rejected', 'Check the entered license, or clear the field to use VITE_REGULA_LICENSE.');
+        return;
+      }
     }
     setProcessing(true, 'Regula is reading the selected image…');
     setNotice('', 'Reading with Regula', 'Keep this page open while the image is processed.');
@@ -771,21 +782,25 @@ async function processWithRegula(file) {
   }
 }
 
-async function initializeReader() {
+async function initializeReader(licenseOverride = '', updateChooser = true) {
+  const configuredLicense = import.meta.env.VITE_REGULA_LICENSE?.trim() || '';
+  const license = licenseOverride.trim() || configuredLicense;
   try {
+    window.RegulaDocumentSDK?.shutdown?.();
     window.RegulaDocumentSDK = new DocumentReaderService();
     const processOptions = { processParam: { scenario: 'FullProcess' } };
     window.RegulaDocumentSDK.recognizerProcessParam = processOptions;
     window.RegulaDocumentSDK.imageProcessParam = processOptions;
 
     await defineComponents();
-    const license = import.meta.env.VITE_REGULA_LICENSE?.trim();
     await window.RegulaDocumentSDK.initialize(license ? { license } : undefined);
 
     regulaReady = true;
+    activeRegulaLicense = license;
     readerFrame.setAttribute('aria-busy', 'false');
+    readerFrame.classList.remove('has-error');
     readerFrame.classList.add('is-ready');
-    if (activeProvider === 'regula') {
+    if (updateChooser && activeProvider === 'regula') {
       readerComponent.hidden = true;
       readerPlaceholder.hidden = false;
       reopenReaderButton.disabled = false;
@@ -793,17 +808,21 @@ async function initializeReader() {
       setPlaceholder('Choose your document', 'Regula will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
       setNotice('ready', 'Regula OCR selected', 'Upload or capture a document image to extract its identity details.');
     }
+    return true;
   } catch (error) {
     console.error('Regula initialization failed:', error);
+    regulaReady = false;
+    activeRegulaLicense = '';
     readerFrame.setAttribute('aria-busy', 'false');
     readerFrame.classList.add('has-error');
-    if (activeProvider === 'regula') {
+    if (updateChooser && activeProvider === 'regula') {
       readerComponent.hidden = true;
       readerPlaceholder.hidden = false;
       reopenReaderButton.disabled = false;
       openaiCameraButton.hidden = false;
       setNotice('error', 'Document reader needs a license', 'Add VITE_REGULA_LICENSE to a local .env file, or configure domain licensing for this host.');
     }
+    return false;
   }
 }
 
