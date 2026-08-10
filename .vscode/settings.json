@@ -1,0 +1,15 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "git remote": true,
+        "Test-Path": true,
+        "Get-Item": true,
+        "/^git -C D:/TimeTec_Project/web_ocr status --short --branch; git -C D:/TimeTec_Project/web_ocr remote -v$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "Get-Command": true,
+        "git init": true,
+        "git add": true,
+        "git commit": true
+    }
+}

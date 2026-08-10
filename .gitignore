@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.browser-profile/
+.chrome-profile/
+.chrome-profile-mobile/
+.openai-ui-profile/
+page-preview*.png
+*-preview.png
+app.*.log
