@@ -46,6 +46,7 @@ app.innerHTML = `
             <div class="provider-toggle" role="radiogroup" aria-label="OCR provider">
               <button class="provider-option" type="button" role="radio" aria-checked="false" data-provider="regula">Regula</button>
               <button class="provider-option is-selected" type="button" role="radio" aria-checked="true" data-provider="openai">OpenAI</button>
+              <button class="provider-option" type="button" role="radio" aria-checked="false" data-provider="deepseek">DeepSeek</button>
             </div>
             <div id="openai-key-config" class="api-key-config" hidden>
               <label for="openai-api-key">OpenAI API key <span>Optional override</span></label>
@@ -56,6 +57,11 @@ app.innerHTML = `
               <label for="regula-license-key">Regula license key <span>Optional override</span></label>
               <input id="regula-license-key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste Base64 license" />
               <small>Enter a license to use it for this session, or leave blank to use VITE_REGULA_LICENSE.</small>
+            </div>
+            <div id="deepseek-key-config" class="api-key-config" hidden>
+              <label for="deepseek-api-key">DeepSeek API key <span>Optional override</span></label>
+              <input id="deepseek-api-key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…" />
+              <small>Enter a key to use it for this session. On static hosting it is sent directly to DeepSeek and is not saved; leave blank to use the server key.</small>
             </div>
           </div>
         </section>
@@ -75,6 +81,7 @@ app.innerHTML = `
             <div id="reader-frame" class="reader-frame" aria-busy="true">
               <input id="openai-file" type="file" accept="image/jpeg,image/png,image/webp" hidden />
               <input id="regula-file" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+              <input id="deepseek-file" type="file" accept="image/jpeg,image/png,image/webp" hidden />
               <input id="openai-camera-file" type="file" accept="image/*" capture="environment" hidden />
               <canvas id="camera-canvas" hidden></canvas>
               <document-reader
@@ -153,7 +160,7 @@ app.innerHTML = `
               <button id="start-over" class="text-button" type="button">Scan another document</button>
             </div>
             <div id="usage-summary" class="usage-summary" hidden>
-              <div class="usage-heading"><strong>OpenAI usage &amp; pricing</strong><span id="usage-model">gpt-5.6-luna</span></div>
+              <div class="usage-heading"><strong id="usage-heading">OpenAI usage &amp; pricing</strong><span id="usage-model">gpt-5.6-luna</span></div>
               <div class="usage-grid">
                 <span>Input tokens<strong id="usage-input">0</strong></span>
                 <span>Cached<strong id="usage-cached">0</strong></span>
@@ -186,6 +193,7 @@ const completed = document.querySelector('#completed');
 const fullNameInput = document.querySelector('#full-name');
 const identityNumberInput = document.querySelector('#identity-number');
 const usageSummary = document.querySelector('#usage-summary');
+const usageHeading = document.querySelector('#usage-heading');
 const usageModel = document.querySelector('#usage-model');
 const usageInput = document.querySelector('#usage-input');
 const usageCached = document.querySelector('#usage-cached');
@@ -204,8 +212,11 @@ const openaiKeyConfig = document.querySelector('#openai-key-config');
 const openaiApiKeyInput = document.querySelector('#openai-api-key');
 const regulaKeyConfig = document.querySelector('#regula-key-config');
 const regulaLicenseInput = document.querySelector('#regula-license-key');
+const deepseekKeyConfig = document.querySelector('#deepseek-key-config');
+const deepseekApiKeyInput = document.querySelector('#deepseek-api-key');
 const openaiFileInput = document.querySelector('#openai-file');
 const regulaFileInput = document.querySelector('#regula-file');
+const deepseekFileInput = document.querySelector('#deepseek-file');
 const openaiCameraFileInput = document.querySelector('#openai-camera-file');
 const documentPreview = document.querySelector('#document-preview');
 const documentPreviewImage = document.querySelector('#document-preview-image');
@@ -227,8 +238,10 @@ const dataNote = document.querySelector('#data-note');
 let activeProvider = 'openai';
 let regulaReady = false;
 let openaiPricing = null;
+let deepseekPricing = null;
 let openaiCameraStream = null;
 let serverApiKeyConfigured = false;
+let serverDeepSeekApiKeyConfigured = false;
 let availableCameraDevices = [];
 let activeRegulaLicense = '';
 
@@ -241,13 +254,22 @@ const defaultOpenAIPricing = {
   configured: true,
 };
 
+const defaultDeepSeekPricing = {
+  model: 'deepseek-v4-flash',
+  inputUsdPerMillion: 0.14,
+  cachedInputUsdPerMillion: 0.0028,
+  outputUsdPerMillion: 0.28,
+  usdToMyr: 4.0651,
+  configured: true,
+};
+
 function resetResults() {
   setProcessing(false);
   clearDocumentPreview();
   fullNameInput.value = '';
   identityNumberInput.value = '';
   renderUsageSummary();
-  usageSummary.hidden = activeProvider !== 'openai';
+  usageSummary.hidden = !['openai', 'deepseek'].includes(activeProvider);
   resultData.hidden = true;
   completed.hidden = true;
   resultEmpty.hidden = false;
@@ -281,6 +303,7 @@ function setProcessing(isProcessing, message = 'Extracting identity details…')
 function updateApiKeyVisibility() {
   openaiKeyConfig.hidden = activeProvider !== 'openai';
   regulaKeyConfig.hidden = activeProvider !== 'regula';
+  deepseekKeyConfig.hidden = activeProvider !== 'deepseek';
 }
 
 function hasOpenAICredentials() {
@@ -288,6 +311,14 @@ function hasOpenAICredentials() {
   openaiKeyConfig.hidden = false;
   openaiApiKeyInput.focus();
   setNotice('error', 'OpenAI API key required', 'Enter an API key above to process this document. It will be used for this session only.');
+  return false;
+}
+
+function hasDeepSeekCredentials() {
+  if (deepseekApiKeyInput.value.trim() || serverDeepSeekApiKeyConfigured) return true;
+  deepseekKeyConfig.hidden = false;
+  deepseekApiKeyInput.focus();
+  setNotice('error', 'DeepSeek API key required', 'Enter a DeepSeek API key above to process this document. It will be used for this session only.');
   return false;
 }
 
@@ -302,7 +333,7 @@ function stopOpenAICamera(showPlaceholder = true) {
   releaseOpenAICameraStream();
   openaiCamera.hidden = true;
   readerFrame.classList.remove('is-camera-open');
-  if (showPlaceholder && activeProvider === 'openai') readerPlaceholder.hidden = false;
+  if (showPlaceholder && ['openai', 'deepseek'].includes(activeProvider)) readerPlaceholder.hidden = false;
 }
 
 function waitForCameraFrame(video, timeoutMs = 6000) {
@@ -403,6 +434,7 @@ async function connectFirstWorkingCamera(devices) {
 
 async function startOpenAICamera() {
   if (activeProvider === 'openai' && !hasOpenAICredentials()) return;
+  if (activeProvider === 'deepseek' && !hasDeepSeekCredentials()) return;
   nativeCameraButton.hidden = true;
   if (!window.isSecureContext) {
     nativeCameraButton.hidden = false;
@@ -477,6 +509,7 @@ async function captureOpenAIPhoto() {
   stopOpenAICamera(false);
   const photoFile = new File([photoBlob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
   if (activeProvider === 'openai') await processWithOpenAI(photoFile);
+  else if (activeProvider === 'deepseek') await processWithDeepSeek(photoFile);
   else await processWithRegula(photoFile);
 }
 
@@ -498,20 +531,25 @@ function selectProvider(provider) {
   });
 
   const useOpenAI = provider === 'openai';
-  providerCredit.textContent = useOpenAI ? 'OpenAI' : 'Regula';
-  readerFrame.classList.toggle('is-openai', useOpenAI);
+  const useDeepSeek = provider === 'deepseek';
+  const useCloudOcr = useOpenAI || useDeepSeek;
+  providerCredit.textContent = useOpenAI ? 'OpenAI' : useDeepSeek ? 'DeepSeek' : 'Regula';
+  readerFrame.classList.toggle('is-openai', useCloudOcr);
   readerFrame.classList.remove('is-closed');
 
-  if (useOpenAI) {
+  if (useCloudOcr) {
+    const providerName = useOpenAI ? 'OpenAI' : 'DeepSeek V4 Flash';
     readerComponent.hidden = true;
     readerPlaceholder.hidden = false;
     reopenReaderButton.disabled = false;
     openaiCameraButton.hidden = false;
     nativeCameraButton.hidden = true;
     readerFrame.setAttribute('aria-busy', 'false');
-    setPlaceholder('Choose your document', 'OpenAI will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
-    setNotice('', 'OpenAI OCR selected', 'Upload a document image to extract its identity details.');
-    dataNote.lastChild.textContent = ' Document image is sent to OpenAI for extraction';
+    setPlaceholder('Choose your document', `${providerName} will extract the identity details`, 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+    setNotice('', `${providerName} selected`, 'Upload or capture a document image to extract its identity details.');
+    dataNote.lastChild.textContent = useOpenAI
+      ? ' Document image is sent to OpenAI for extraction'
+      : ' OCR runs in your browser; recognized text is sent to DeepSeek';
   } else {
     openaiCameraButton.hidden = false;
     nativeCameraButton.hidden = true;
@@ -636,8 +674,10 @@ function formatRate(value) {
 }
 
 function renderUsageSummary(usage = null) {
-  const pricing = usage?.pricing || openaiPricing;
-  usageModel.textContent = usage?.model || pricing?.model || 'gpt-5.6-luna';
+  const isDeepSeek = activeProvider === 'deepseek';
+  const pricing = usage?.pricing || (isDeepSeek ? deepseekPricing : openaiPricing);
+  usageHeading.textContent = `${isDeepSeek ? 'DeepSeek' : 'OpenAI'} usage & pricing`;
+  usageModel.textContent = usage?.model || pricing?.model || (isDeepSeek ? 'deepseek-v4-flash' : 'gpt-5.6-luna');
   usageInput.textContent = Number(usage?.inputTokens || 0).toLocaleString();
   usageCached.textContent = Number(usage?.cachedInputTokens || 0).toLocaleString();
   usageOutput.textContent = Number(usage?.outputTokens || 0).toLocaleString();
@@ -653,7 +693,7 @@ function renderUsageSummary(usage = null) {
     : 'Loading configured rates…';
   usagePricingNote.textContent = usage?.pricingConfigured
     ? `Estimated using USD 1 = RM ${Number(pricing.usdToMyr).toFixed(4)}. Reasoning tokens: ${Number(usage.reasoningTokens || 0).toLocaleString()}.`
-    : 'Set the current token rates and USD_TO_MYR in .env; usage totals update after a successful scan.';
+    : `Set the current ${isDeepSeek ? 'DeepSeek' : 'OpenAI'} token rates and USD_TO_MYR in .env; usage totals update after a successful scan.`;
 }
 
 async function loadOpenAIPricing() {
@@ -673,6 +713,21 @@ async function loadOpenAIPricing() {
   }
 }
 
+async function loadDeepSeekPricing() {
+  try {
+    const response = await fetch('/api/deepseek-pricing');
+    const contentType = response.headers.get('content-type') || '';
+    if (!response.ok || !contentType.includes('application/json')) throw new Error('Pricing backend unavailable');
+    deepseekPricing = await response.json();
+    serverDeepSeekApiKeyConfigured = Boolean(deepseekPricing.apiKeyConfigured);
+  } catch {
+    deepseekPricing = defaultDeepSeekPricing;
+    serverDeepSeekApiKeyConfigured = false;
+  }
+  updateApiKeyVisibility();
+  if (activeProvider === 'deepseek') renderUsageSummary();
+}
+
 function showIdentityResults(name, identityNumber, usage = null) {
   fullNameInput.value = name;
   identityNumberInput.value = identityNumber;
@@ -681,7 +736,7 @@ function showIdentityResults(name, identityNumber, usage = null) {
   resultData.hidden = false;
   setStep(2);
 
-  usageSummary.hidden = activeProvider !== 'openai';
+  usageSummary.hidden = !['openai', 'deepseek'].includes(activeProvider);
   renderUsageSummary(usage);
 
   if (!name && !identityNumber) {
@@ -810,6 +865,172 @@ async function requestOpenAIOCR(imageDataUrl, manualApiKey) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || 'OpenAI OCR failed.');
   return payload;
+}
+
+function summarizeDeepSeekUsage(result) {
+  const pricing = deepseekPricing || defaultDeepSeekPricing;
+  const usage = result.usage || {};
+  const inputTokens = Number(usage.prompt_tokens) || 0;
+  const cachedInputTokens = Number(usage.prompt_cache_hit_tokens) || 0;
+  const outputTokens = Number(usage.completion_tokens) || 0;
+  const reasoningTokens = Number(usage.completion_tokens_details?.reasoning_tokens) || 0;
+  const totalTokens = Number(usage.total_tokens) || inputTokens + outputTokens;
+  const uncachedInputTokens = Number(usage.prompt_cache_miss_tokens)
+    || Math.max(0, inputTokens - cachedInputTokens);
+  const pricingConfigured = Boolean(
+    pricing.inputUsdPerMillion && pricing.outputUsdPerMillion && pricing.usdToMyr,
+  );
+  let estimatedCostUsd = null;
+  let estimatedCostMyr = null;
+
+  if (pricingConfigured) {
+    estimatedCostUsd = (uncachedInputTokens / 1_000_000) * pricing.inputUsdPerMillion
+      + (cachedInputTokens / 1_000_000)
+        * (pricing.cachedInputUsdPerMillion || pricing.inputUsdPerMillion)
+      + (outputTokens / 1_000_000) * pricing.outputUsdPerMillion;
+    estimatedCostMyr = estimatedCostUsd * pricing.usdToMyr;
+  }
+
+  return {
+    model: result.model || pricing.model,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningTokens,
+    totalTokens,
+    estimatedCostUsd,
+    estimatedCostMyr,
+    pricingConfigured,
+    pricing,
+  };
+}
+
+function buildDeepSeekRequest(recognizedText) {
+  return {
+    model: deepseekPricing?.model || defaultDeepSeekPricing.model,
+    messages: [
+      {
+        role: 'system',
+        content: 'Extract identity-document details from OCR text. Return JSON only in this exact format: {"full_name":"","identity_number":"","document_type":""}. Preserve values exactly as printed and use empty strings when unreadable.',
+      },
+      { role: 'user', content: `OCR text:\n${recognizedText}` },
+    ],
+    response_format: { type: 'json_object' },
+    thinking: { type: 'disabled' },
+    max_tokens: 300,
+    stream: false,
+  };
+}
+
+function parseDeepSeekResult(result) {
+  const content = result.choices?.[0]?.message?.content;
+  if (!content) throw new Error('DeepSeek returned an empty result. Try a clearer image.');
+  const extracted = JSON.parse(content);
+  return {
+    name: extracted.full_name || '',
+    identityNumber: extracted.identity_number || '',
+    documentType: extracted.document_type || '',
+    usage: summarizeDeepSeekUsage(result),
+  };
+}
+
+async function processDeepSeekDirectly(recognizedText, apiKey) {
+  const response = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(buildDeepSeekRequest(recognizedText)),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error?.message || 'DeepSeek could not process the recognized text.');
+  }
+  return parseDeepSeekResult(result);
+}
+
+async function requestDeepSeekOcr(recognizedText, manualApiKey) {
+  let response;
+  try {
+    response = await fetch('/api/deepseek-ocr', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(manualApiKey ? { 'X-DeepSeek-API-Key': manualApiKey } : {}),
+      },
+      body: JSON.stringify({ recognizedText, ...(manualApiKey ? { apiKey: manualApiKey } : {}) }),
+    });
+  } catch {
+    if (manualApiKey) return processDeepSeekDirectly(recognizedText, manualApiKey);
+    throw new Error('The DeepSeek backend is unavailable. Enter a DeepSeek API key above or deploy the Node server with `npm start`.');
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  const backendUnavailable = response.status === 404 || !contentType.includes('application/json');
+  if (backendUnavailable) {
+    if (manualApiKey) return processDeepSeekDirectly(recognizedText, manualApiKey);
+    throw new Error('The DeepSeek backend is not deployed. Enter a DeepSeek API key above or host the Node server with `npm start`.');
+  }
+
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'DeepSeek OCR failed.');
+  return payload;
+}
+
+async function extractTextInBrowser(imageDataUrl) {
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('eng', 1, {
+    logger: (progress) => {
+      if (progress.status === 'recognizing text') {
+        processingMessage.textContent = `Reading image locally… ${Math.round((progress.progress || 0) * 100)}%`;
+      }
+    },
+  });
+  try {
+    const result = await worker.recognize(imageDataUrl);
+    return result.data?.text?.trim() || '';
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function processWithDeepSeek(file) {
+  if (!file) return;
+  if (!hasDeepSeekCredentials()) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    setNotice('error', 'Unsupported file type', 'DeepSeek mode accepts JPG, PNG, or WebP images.');
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    setNotice('error', 'File is too large', 'Choose an image smaller than 10 MB.');
+    return;
+  }
+
+  try {
+    resetResults();
+    reopenReaderButton.disabled = true;
+    const imageDataUrl = await fileToDataUrl(file);
+    showDocumentPreview(imageDataUrl, file.name);
+    setProcessing(true, 'Reading the image locally…');
+    setPlaceholder('Reading your document', 'Local OCR is preparing text for DeepSeek', 'Processing…', file.name);
+    setNotice('', 'Reading for DeepSeek', 'The image stays in this browser while local OCR reads its text.');
+    const recognizedText = await extractTextInBrowser(imageDataUrl);
+    if (!recognizedText) throw new Error('No readable text was found. Try a clearer, closer image.');
+
+    processingMessage.textContent = 'DeepSeek V4 Flash is extracting identity details…';
+    setNotice('', 'Reading with DeepSeek V4 Flash', 'Only the locally recognized text is being sent to DeepSeek.');
+    const payload = await requestDeepSeekOcr(recognizedText, deepseekApiKeyInput.value.trim());
+    showIdentityResults(payload.name || '', payload.identityNumber || '', payload.usage || null);
+    setPlaceholder('Choose another document', 'Upload a new image to replace these results', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+  } catch (error) {
+    setNotice('error', 'DeepSeek OCR failed', error.message || 'Try a clearer image.');
+    setPlaceholder('Try another document', 'Use a clear image with all four corners visible', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+  } finally {
+    setProcessing(false);
+    reopenReaderButton.disabled = false;
+    deepseekFileInput.value = '';
+  }
 }
 
 async function processWithOpenAI(file) {
@@ -977,7 +1198,9 @@ reopenReaderButton.addEventListener('click', () => {
   if (activeProvider === 'openai') {
     if (hasOpenAICredentials()) openaiFileInput.click();
   }
-  else regulaFileInput.click();
+  else if (activeProvider === 'deepseek') {
+    if (hasDeepSeekCredentials()) deepseekFileInput.click();
+  } else regulaFileInput.click();
 });
 
 changeDocumentButton.addEventListener('click', () => {
@@ -988,6 +1211,9 @@ changeDocumentButton.addEventListener('click', () => {
   if (activeProvider === 'openai') {
     setPlaceholder('Choose your document', 'OpenAI will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
     setNotice('', 'OpenAI OCR selected', 'Upload or capture a document image when you’re ready.');
+  } else if (activeProvider === 'deepseek') {
+    setPlaceholder('Choose your document', 'DeepSeek V4 Flash will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
+    setNotice('', 'DeepSeek V4 Flash selected', 'Upload or capture a document image when you’re ready.');
   } else {
     if (regulaReady) {
       setPlaceholder('Choose your document', 'Regula will extract the identity details', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');
@@ -1024,10 +1250,12 @@ cancelCameraButton.addEventListener('click', () => {
 
 openaiFileInput.addEventListener('change', () => processWithOpenAI(openaiFileInput.files?.[0]));
 regulaFileInput.addEventListener('change', () => processWithRegula(regulaFileInput.files?.[0]));
+deepseekFileInput.addEventListener('change', () => processWithDeepSeek(deepseekFileInput.files?.[0]));
 openaiCameraFileInput.addEventListener('change', () => {
   const file = openaiCameraFileInput.files?.[0];
   openaiCameraFileInput.value = '';
   if (activeProvider === 'openai') processWithOpenAI(file);
+  else if (activeProvider === 'deepseek') processWithDeepSeek(file);
   else processWithRegula(file);
 });
 
@@ -1047,6 +1275,9 @@ startOverButton.addEventListener('click', () => {
   if (activeProvider === 'openai') {
     readerPlaceholder.hidden = false;
     setNotice('', 'OpenAI OCR selected', 'Upload another document image when you’re ready.');
+  } else if (activeProvider === 'deepseek') {
+    readerPlaceholder.hidden = false;
+    setNotice('', 'DeepSeek V4 Flash selected', 'Upload or capture another document image when you’re ready.');
   } else {
     readerPlaceholder.hidden = false;
     setNotice('ready', 'Regula OCR selected', 'Upload or capture another document image when you’re ready.');
@@ -1056,3 +1287,4 @@ startOverButton.addEventListener('click', () => {
 selectProvider('openai');
 initializeReader();
 loadOpenAIPricing();
+loadDeepSeekPricing();

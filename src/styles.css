@@ -52,7 +52,7 @@ h1 { margin: 0; color: var(--navy); font-family: 'Fraunces', serif; font-size: c
 .settings-copy strong { display: block; color: var(--navy); font-size: 13px; }
 .settings-copy p { margin: 2px 0 0; color: #7b8588; font-size: 11px; }
 .provider-controls { min-width: min(100%, 390px); }
-.provider-toggle { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid #cbd4d1; border-radius: 7px; background: #eef1ef; }
+.provider-toggle { display: grid; grid-template-columns: repeat(3, 1fr); padding: 3px; border: 1px solid #cbd4d1; border-radius: 7px; background: #eef1ef; }
 .provider-option { padding: 8px 18px; border: 0; border-radius: 4px; background: transparent; color: #677478; font-size: 11px; font-weight: 700; }
 .provider-option.is-selected { background: white; color: var(--navy); box-shadow: 0 1px 5px rgba(14,42,55,.12); }
 .api-key-config { margin-top: 10px; padding: 11px; border: 1px solid #d5dfdc; border-radius: 7px; background: #f7faf9; }

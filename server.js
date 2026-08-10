@@ -30,6 +30,22 @@ function getPricingConfig() {
   };
 }
 
+function getDeepSeekPricingConfig() {
+  const inputUsdPerMillion = readPositiveNumber('DEEPSEEK_INPUT_USD_PER_1M');
+  const cachedInputUsdPerMillion = readPositiveNumber('DEEPSEEK_CACHED_INPUT_USD_PER_1M');
+  const outputUsdPerMillion = readPositiveNumber('DEEPSEEK_OUTPUT_USD_PER_1M');
+  const usdToMyr = readPositiveNumber('USD_TO_MYR');
+
+  return {
+    model: process.env.DEEPSEEK_OCR_MODEL || 'deepseek-v4-flash',
+    inputUsdPerMillion,
+    cachedInputUsdPerMillion,
+    outputUsdPerMillion,
+    usdToMyr,
+    configured: Boolean(inputUsdPerMillion && outputUsdPerMillion && usdToMyr),
+  };
+}
+
 function summarizeUsage(result) {
   const inputTokens = Number(result.usage?.input_tokens) || 0;
   const cachedInputTokens = Number(result.usage?.input_tokens_details?.cached_tokens) || 0;
@@ -64,6 +80,40 @@ function summarizeUsage(result) {
   };
 }
 
+function summarizeDeepSeekUsage(result) {
+  const inputTokens = Number(result.usage?.prompt_tokens) || 0;
+  const cachedInputTokens = Number(result.usage?.prompt_cache_hit_tokens) || 0;
+  const uncachedInputTokens = Number(result.usage?.prompt_cache_miss_tokens)
+    || Math.max(0, inputTokens - cachedInputTokens);
+  const outputTokens = Number(result.usage?.completion_tokens) || 0;
+  const reasoningTokens = Number(result.usage?.completion_tokens_details?.reasoning_tokens) || 0;
+  const totalTokens = Number(result.usage?.total_tokens) || inputTokens + outputTokens;
+  const pricing = getDeepSeekPricingConfig();
+
+  let estimatedCostUsd = null;
+  let estimatedCostMyr = null;
+  if (pricing.configured) {
+    estimatedCostUsd = (uncachedInputTokens / 1_000_000) * pricing.inputUsdPerMillion
+      + (cachedInputTokens / 1_000_000)
+        * (pricing.cachedInputUsdPerMillion || pricing.inputUsdPerMillion)
+      + (outputTokens / 1_000_000) * pricing.outputUsdPerMillion;
+    estimatedCostMyr = estimatedCostUsd * pricing.usdToMyr;
+  }
+
+  return {
+    model: result.model || pricing.model,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningTokens,
+    totalTokens,
+    estimatedCostUsd,
+    estimatedCostMyr,
+    pricingConfigured: pricing.configured,
+    pricing,
+  };
+}
+
 app.disable('x-powered-by');
 app.use(express.json({ limit: '15mb' }));
 
@@ -72,6 +122,88 @@ app.get('/api/openai-pricing', (_request, response) => {
     ...getPricingConfig(),
     apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY?.trim()),
   });
+});
+
+app.get('/api/deepseek-pricing', (_request, response) => {
+  response.json({
+    ...getDeepSeekPricingConfig(),
+    apiKeyConfigured: Boolean(process.env.DEEPSEEK_API_KEY?.trim()),
+  });
+});
+
+app.post('/api/deepseek-ocr', async (request, response) => {
+  const serverApiKey = process.env.DEEPSEEK_API_KEY?.trim();
+  const bodyApiKey = typeof request.body?.apiKey === 'string' ? request.body.apiKey.trim() : '';
+  const requestApiKey = bodyApiKey || request.get('x-deepseek-api-key')?.trim();
+  const apiKey = requestApiKey || serverApiKey;
+  const recognizedText = typeof request.body?.recognizedText === 'string'
+    ? request.body.recognizedText.trim()
+    : '';
+
+  if (!apiKey) return response.status(400).json({ error: 'Enter a DeepSeek API key to use DeepSeek OCR.' });
+  if (requestApiKey && requestApiKey.length > 512) {
+    return response.status(400).json({ error: 'The supplied DeepSeek API key is invalid.' });
+  }
+  if (!recognizedText) {
+    return response.status(400).json({ error: 'No readable text was found in the document image.' });
+  }
+  if (recognizedText.length > 100_000) {
+    return response.status(400).json({ error: 'The recognized document text is too large.' });
+  }
+
+  try {
+    const deepSeekResponse = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: process.env.DEEPSEEK_OCR_MODEL || 'deepseek-v4-flash',
+        messages: [
+          {
+            role: 'system',
+            content: 'Extract identity-document details from OCR text. Return JSON only in this exact format: {"full_name":"","identity_number":"","document_type":""}. Preserve values exactly as printed and use empty strings when unreadable.',
+          },
+          { role: 'user', content: `OCR text:\n${recognizedText}` },
+        ],
+        response_format: { type: 'json_object' },
+        thinking: { type: 'disabled' },
+        max_tokens: 300,
+        stream: false,
+      }),
+    });
+    const result = await deepSeekResponse.json().catch(() => ({}));
+    if (!deepSeekResponse.ok) {
+      const error = new Error(result.error?.message || 'DeepSeek API request failed.');
+      error.status = deepSeekResponse.status;
+      throw error;
+    }
+
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('DeepSeek returned an empty result.');
+    const extracted = JSON.parse(content);
+    return response.json({
+      name: extracted.full_name || '',
+      identityNumber: extracted.identity_number || '',
+      documentType: extracted.document_type || '',
+      usage: summarizeDeepSeekUsage(result),
+    });
+  } catch (error) {
+    const status = Number(error?.status) || 500;
+    const safeStatus = status >= 400 && status < 600 ? status : 500;
+    const message = safeStatus === 401
+      ? 'The DeepSeek API key was rejected.'
+      : safeStatus === 402
+        ? 'The DeepSeek account does not have enough balance.'
+        : safeStatus === 429
+          ? 'DeepSeek rate limit reached. Try again shortly.'
+          : safeStatus >= 500
+            ? 'DeepSeek could not process this document. Try again shortly.'
+            : 'DeepSeek could not extract the document details.';
+    console.error('DeepSeek OCR request failed:', error?.message || error);
+    return response.status(safeStatus).json({ error: message });
+  }
 });
 
 app.post('/api/openai-ocr', async (request, response) => {

@@ -13,7 +13,8 @@
     "@regulaforensics/vp-frontend-document-components": "^9.6.2940",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "openai": "^5.12.2"
+    "openai": "^5.12.2",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "vite": "^7.1.1"
