@@ -755,6 +755,38 @@ function fileToDataUrl(file) {
   });
 }
 
+function createLowerCardDetail(imageDataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const cropY = Math.floor(image.naturalHeight * 0.58);
+      const cropHeight = Math.max(1, image.naturalHeight - cropY);
+      const scale = Math.min(3, 1800 / image.naturalWidth);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(cropHeight * scale));
+      const context = canvas.getContext('2d');
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
+      context.filter = 'contrast(1.3) saturate(0.8)';
+      context.drawImage(
+        image,
+        0,
+        cropY,
+        image.naturalWidth,
+        cropHeight,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+      resolve(canvas.toDataURL('image/jpeg', 0.95));
+    };
+    image.onerror = () => reject(new Error('The document detail image could not be prepared.'));
+    image.src = imageDataUrl;
+  });
+}
+
 function summarizeOpenAIUsage(result) {
   const pricing = openaiPricing || defaultOpenAIPricing;
   const inputTokens = Number(result.usage?.input_tokens) || 0;
@@ -791,7 +823,7 @@ function summarizeOpenAIUsage(result) {
   };
 }
 
-async function processOpenAIDirectly(imageDataUrl, apiKey) {
+async function processOpenAIDirectly(imageDataUrl, detailImageDataUrl, apiKey) {
   const openai = new OpenAI({
     apiKey,
     dangerouslyAllowBrowser: true,
@@ -807,9 +839,10 @@ async function processOpenAIDirectly(imageDataUrl, apiKey) {
       content: [
         {
           type: 'input_text',
-          text: 'Read this identity card or driving license. Return the holder full name and the primary identity, personal, or document number exactly as printed. Use empty strings when a value cannot be read.',
+          text: 'Read this identity card or driving license and return values exactly as visibly printed, without guessing or expanding abbreviations. For a Malaysia CIDB Kad Pendaftaran Personel Binaan, the full_name is the embossed cardholder-name line along the bottom edge; inspect the second close-up image carefully and preserve words such as MEOR or MOHD exactly. The identity_number must be the value beside No. KP/Passport. Never use No. Personel ID, the grouped 16-digit prepaid Mastercard number, expiry date, or occupation as the identity number. For other documents, return the holder full name and primary identity, personal, or document number. Use empty strings when unreadable.',
         },
         { type: 'input_image', image_url: imageDataUrl, detail: 'high' },
+        { type: 'input_image', image_url: detailImageDataUrl, detail: 'high' },
       ],
     }],
     text: {
@@ -839,7 +872,7 @@ async function processOpenAIDirectly(imageDataUrl, apiKey) {
   };
 }
 
-async function requestOpenAIOCR(imageDataUrl, manualApiKey) {
+async function requestOpenAIOCR(imageDataUrl, detailImageDataUrl, manualApiKey) {
   let response;
   try {
     response = await fetch('/api/openai-ocr', {
@@ -848,17 +881,17 @@ async function requestOpenAIOCR(imageDataUrl, manualApiKey) {
         'Content-Type': 'application/json',
         ...(manualApiKey ? { 'X-OpenAI-API-Key': manualApiKey } : {}),
       },
-      body: JSON.stringify({ imageDataUrl, ...(manualApiKey ? { apiKey: manualApiKey } : {}) }),
+      body: JSON.stringify({ imageDataUrl, detailImageDataUrl, ...(manualApiKey ? { apiKey: manualApiKey } : {}) }),
     });
   } catch {
-    if (manualApiKey) return processOpenAIDirectly(imageDataUrl, manualApiKey);
+    if (manualApiKey) return processOpenAIDirectly(imageDataUrl, detailImageDataUrl, manualApiKey);
     throw new Error('The OCR backend is unavailable. Enter an OpenAI API key above or deploy the Node server with `npm start`.');
   }
 
   const contentType = response.headers.get('content-type') || '';
   const backendUnavailable = response.status === 404 || !contentType.includes('application/json');
   if (backendUnavailable) {
-    if (manualApiKey) return processOpenAIDirectly(imageDataUrl, manualApiKey);
+    if (manualApiKey) return processOpenAIDirectly(imageDataUrl, detailImageDataUrl, manualApiKey);
     throw new Error('The OCR backend is not deployed. Enter an OpenAI API key above or host the Node server with `npm start`.');
   }
 
@@ -911,7 +944,7 @@ function buildDeepSeekRequest(recognizedText) {
     messages: [
       {
         role: 'system',
-        content: 'Extract identity-document details from OCR text. Return JSON only in this exact format: {"full_name":"","identity_number":"","document_type":""}. Preserve values exactly as printed and use empty strings when unreadable.',
+        content: 'Extract identity-document details from OCR text. Return JSON only in this exact format: {"full_name":"","identity_number":"","document_type":""}. Preserve values exactly as printed and never guess. For a Malaysia CIDB Kad Pendaftaran Personel Binaan, take full_name from the embossed bottom cardholder-name line, prioritizing the BOTTOM NAME DETAIL OCR section, and take identity_number only from No. KP/Passport. Never use No. Personel ID, the grouped 16-digit prepaid card number, expiry date, or occupation as the identity number.',
       },
       { role: 'user', content: `OCR text:\n${recognizedText}` },
     ],
@@ -978,7 +1011,7 @@ async function requestDeepSeekOcr(recognizedText, manualApiKey) {
   return payload;
 }
 
-async function extractTextInBrowser(imageDataUrl) {
+async function extractTextInBrowser(imageDataUrl, detailImageDataUrl) {
   const { createWorker } = await import('tesseract.js');
   const worker = await createWorker('eng', 1, {
     logger: (progress) => {
@@ -988,8 +1021,12 @@ async function extractTextInBrowser(imageDataUrl) {
     },
   });
   try {
-    const result = await worker.recognize(imageDataUrl);
-    return result.data?.text?.trim() || '';
+    const fullResult = await worker.recognize(imageDataUrl);
+    processingMessage.textContent = 'Reading the lower card details locally…';
+    const detailResult = await worker.recognize(detailImageDataUrl);
+    const fullText = fullResult.data?.text?.trim() || '';
+    const detailText = detailResult.data?.text?.trim() || '';
+    return `${fullText}\n\nBOTTOM NAME DETAIL OCR:\n${detailText}`.trim();
   } finally {
     await worker.terminate();
   }
@@ -1015,7 +1052,8 @@ async function processWithDeepSeek(file) {
     setProcessing(true, 'Reading the image locally…');
     setPlaceholder('Reading your document', 'Local OCR is preparing text for DeepSeek', 'Processing…', file.name);
     setNotice('', 'Reading for DeepSeek', 'The image stays in this browser while local OCR reads its text.');
-    const recognizedText = await extractTextInBrowser(imageDataUrl);
+    const detailImageDataUrl = await createLowerCardDetail(imageDataUrl);
+    const recognizedText = await extractTextInBrowser(imageDataUrl, detailImageDataUrl);
     if (!recognizedText) throw new Error('No readable text was found. Try a clearer, closer image.');
 
     processingMessage.textContent = 'DeepSeek V4 Flash is extracting identity details…';
@@ -1054,8 +1092,9 @@ async function processWithOpenAI(file) {
     setPlaceholder('Reading your document', 'OpenAI is extracting the identity details', 'Processing…', file.name);
     setNotice('', 'Reading with OpenAI', 'Keep this page open while the image is processed.');
 
+    const detailImageDataUrl = await createLowerCardDetail(imageDataUrl);
     const manualApiKey = openaiApiKeyInput.value.trim();
-    const payload = await requestOpenAIOCR(imageDataUrl, manualApiKey);
+    const payload = await requestOpenAIOCR(imageDataUrl, detailImageDataUrl, manualApiKey);
 
     showIdentityResults(payload.name || '', payload.identityNumber || '', payload.usage || null);
     setPlaceholder('Choose another document', 'Upload a new image to replace these results', 'Select image', 'JPG, PNG or WebP · Maximum 10 MB');

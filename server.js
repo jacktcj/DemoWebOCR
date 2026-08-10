@@ -163,7 +163,7 @@ app.post('/api/deepseek-ocr', async (request, response) => {
         messages: [
           {
             role: 'system',
-            content: 'Extract identity-document details from OCR text. Return JSON only in this exact format: {"full_name":"","identity_number":"","document_type":""}. Preserve values exactly as printed and use empty strings when unreadable.',
+            content: 'Extract identity-document details from OCR text. Return JSON only in this exact format: {"full_name":"","identity_number":"","document_type":""}. Preserve values exactly as printed and never guess. For a Malaysia CIDB Kad Pendaftaran Personel Binaan, take full_name from the embossed bottom cardholder-name line, prioritizing the BOTTOM NAME DETAIL OCR section, and take identity_number only from No. KP/Passport. Never use No. Personel ID, the grouped 16-digit prepaid card number, expiry date, or occupation as the identity number.',
           },
           { role: 'user', content: `OCR text:\n${recognizedText}` },
         ],
@@ -211,7 +211,7 @@ app.post('/api/openai-ocr', async (request, response) => {
   const bodyApiKey = typeof request.body?.apiKey === 'string' ? request.body.apiKey.trim() : '';
   const requestApiKey = bodyApiKey || request.get('x-openai-api-key')?.trim();
   const apiKey = requestApiKey || serverApiKey;
-  const { imageDataUrl } = request.body || {};
+  const { imageDataUrl, detailImageDataUrl } = request.body || {};
 
   if (!apiKey) {
     return response.status(400).json({
@@ -225,6 +225,9 @@ app.post('/api/openai-ocr', async (request, response) => {
 
   if (typeof imageDataUrl !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/i.test(imageDataUrl)) {
     return response.status(400).json({ error: 'Upload a JPG, PNG, or WebP image.' });
+  }
+  if (typeof detailImageDataUrl !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/i.test(detailImageDataUrl)) {
+    return response.status(400).json({ error: 'The document detail image could not be prepared.' });
   }
 
   try {
@@ -243,11 +246,16 @@ app.post('/api/openai-ocr', async (request, response) => {
           content: [
             {
               type: 'input_text',
-              text: 'Read this identity card or driving license. Return the holder full name and the primary identity, personal, or document number exactly as printed. Use empty strings when a value cannot be read.',
+              text: 'Read this identity card or driving license and return values exactly as visibly printed, without guessing or expanding abbreviations. For a Malaysia CIDB Kad Pendaftaran Personel Binaan, the full_name is the embossed cardholder-name line along the bottom edge; inspect the second close-up image carefully and preserve words such as MEOR or MOHD exactly. The identity_number must be the value beside No. KP/Passport. Never use No. Personel ID, the grouped 16-digit prepaid Mastercard number, expiry date, or occupation as the identity number. For other documents, return the holder full name and primary identity, personal, or document number. Use empty strings when unreadable.',
             },
             {
               type: 'input_image',
               image_url: imageDataUrl,
+              detail: 'high',
+            },
+            {
+              type: 'input_image',
+              image_url: detailImageDataUrl,
               detail: 'high',
             },
           ],
