@@ -1,4 +1,4 @@
-# DocuTrace identity reader
+# TimeTec WebOCR identity reader
 
 A responsive browser interface for uploading an identity card or driving license and extracting the holder's name and identity number with either Regula Document Reader Web Components or OpenAI vision.
 
@@ -25,4 +25,4 @@ The Regula camera flow requires HTTPS in production. `localhost` is treated as a
 - Each successful OpenAI scan displays input, output, and total tokens plus that process's estimated price in MYR and USD, formatted to four decimal places. The example configuration contains the standard GPT-5.6 Luna token rates and a dated USD/MYR reference rate; review both when pricing changes.
 - Extracted fields remain editable so the user can correct OCR results before confirming.
 - Real Regula license values are excluded by `.gitignore` and should never be committed.
-- OpenAI keys are never bundled into client code or saved in browser storage. For production, configure `OPENAI_API_KEY` on the server and leave the browser field empty.
+- OpenAI keys are never bundled into client code or saved in browser storage. When `OPENAI_API_KEY` is missing on the server, OpenAI mode displays a password field for a session-only key and sends it to the same-origin OCR endpoint with each request. For production, configure `OPENAI_API_KEY` on the server instead.

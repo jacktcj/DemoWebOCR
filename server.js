@@ -68,17 +68,26 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '15mb' }));
 
 app.get('/api/openai-pricing', (_request, response) => {
-  response.json(getPricingConfig());
+  response.json({
+    ...getPricingConfig(),
+    apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY?.trim()),
+  });
 });
 
 app.post('/api/openai-ocr', async (request, response) => {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  const serverApiKey = process.env.OPENAI_API_KEY?.trim();
+  const requestApiKey = request.get('x-openai-api-key')?.trim();
+  const apiKey = serverApiKey || requestApiKey;
   const { imageDataUrl } = request.body || {};
 
   if (!apiKey) {
     return response.status(400).json({
-      error: 'OpenAI OCR is not configured on the server.',
+      error: 'Enter an OpenAI API key to use OpenAI OCR.',
     });
+  }
+
+  if (!serverApiKey && apiKey.length > 512) {
+    return response.status(400).json({ error: 'The supplied OpenAI API key is invalid.' });
   }
 
   if (typeof imageDataUrl !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/i.test(imageDataUrl)) {
@@ -175,5 +184,5 @@ if (production) {
 }
 
 app.listen(port, '127.0.0.1', () => {
-  console.log(`DocuTrace running at http://127.0.0.1:${port}/`);
+  console.log(`TimeTec WebOCR running at http://127.0.0.1:${port}/`);
 });

@@ -55,6 +55,12 @@ h1 { margin: 0; color: var(--navy); font-family: 'Fraunces', serif; font-size: c
 .provider-toggle { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid #cbd4d1; border-radius: 7px; background: #eef1ef; }
 .provider-option { padding: 8px 18px; border: 0; border-radius: 4px; background: transparent; color: #677478; font-size: 11px; font-weight: 700; }
 .provider-option.is-selected { background: white; color: var(--navy); box-shadow: 0 1px 5px rgba(14,42,55,.12); }
+.api-key-config { margin-top: 10px; padding: 11px; border: 1px solid #d5dfdc; border-radius: 7px; background: #f7faf9; }
+.api-key-config label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--navy); font-size: 10px; font-weight: 700; }
+.api-key-config label span { color: #788587; font-size: 8px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.api-key-config input { width: 100%; margin-top: 7px; padding: 9px 10px; border: 1px solid #c7d3d0; border-radius: 5px; outline: none; background: white; color: #172331; font-family: ui-monospace, monospace; font-size: 11px; }
+.api-key-config input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #dceeed; }
+.api-key-config small { display: block; margin-top: 6px; color: #7c888a; font-size: 8px; line-height: 1.4; }
 .notice { margin: 0 0 16px; padding: 12px 16px; display: flex; align-items: center; gap: 12px; border: 1px solid #cfdedc; border-radius: 8px; background: #eef6f5; color: #31555a; }
 .notice > div { min-width: 0; }
 .notice-icon { flex: 0 0 auto; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid #86aaa6; border-radius: 50%; font-size: 12px; font-weight: 700; }

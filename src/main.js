@@ -11,11 +11,11 @@ const app = document.querySelector('#app');
 app.innerHTML = `
   <div class="app-shell">
     <header class="site-header">
-      <a class="brand" href="#" aria-label="DocuTrace home">
+      <a class="brand" href="#" aria-label="TimeTec WebOCR home">
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32" role="img"><path d="M6.7 9.6 16 4.2l9.3 5.4v12.8L16 27.8l-9.3-5.4V9.6Z" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="m11.2 16 3 3 6.7-7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.4"/></svg>
         </span>
-        <span>DocuTrace</span>
+        <span>TimeTec WebOCR</span>
       </a>
       <span class="secure-pill"><span></span> Secure session</span>
     </header>
@@ -43,8 +43,13 @@ app.innerHTML = `
           </div>
           <div class="provider-controls">
             <div class="provider-toggle" role="radiogroup" aria-label="OCR provider">
-              <button class="provider-option is-selected" type="button" role="radio" aria-checked="true" data-provider="regula">Regula</button>
-              <button class="provider-option" type="button" role="radio" aria-checked="false" data-provider="openai">OpenAI</button>
+              <button class="provider-option" type="button" role="radio" aria-checked="false" data-provider="regula">Regula</button>
+              <button class="provider-option is-selected" type="button" role="radio" aria-checked="true" data-provider="openai">OpenAI</button>
+            </div>
+            <div id="openai-key-config" class="api-key-config" hidden>
+              <label for="openai-api-key">OpenAI API key <span>Session only</span></label>
+              <input id="openai-api-key" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…" />
+              <small>The key is sent only to this app's server for the OCR request and is not saved.</small>
             </div>
           </div>
         </section>
@@ -184,6 +189,8 @@ const startOverButton = document.querySelector('#start-over');
 const readerComponent = document.querySelector('#document-reader');
 const reopenReaderButton = document.querySelector('#reopen-reader');
 const providerOptions = document.querySelectorAll('.provider-option');
+const openaiKeyConfig = document.querySelector('#openai-key-config');
+const openaiApiKeyInput = document.querySelector('#openai-api-key');
 const openaiFileInput = document.querySelector('#openai-file');
 const openaiCameraFileInput = document.querySelector('#openai-camera-file');
 const documentPreview = document.querySelector('#document-preview');
@@ -201,10 +208,11 @@ const cancelCameraButton = document.querySelector('#cancel-camera');
 const nativeCameraButton = document.querySelector('#native-camera-button');
 const providerCredit = document.querySelector('#provider-credit');
 const dataNote = document.querySelector('#data-note');
-let activeProvider = 'regula';
+let activeProvider = 'openai';
 let regulaReady = false;
 let openaiPricing = null;
 let openaiCameraStream = null;
+let serverApiKeyConfigured = true;
 
 function resetResults() {
   setProcessing(false);
@@ -243,6 +251,18 @@ function setProcessing(isProcessing, message = 'Extracting identity details…')
   readerFrame.setAttribute('aria-busy', String(isProcessing));
 }
 
+function updateApiKeyVisibility() {
+  openaiKeyConfig.hidden = activeProvider !== 'openai' || serverApiKeyConfigured;
+}
+
+function hasOpenAICredentials() {
+  if (serverApiKeyConfigured || openaiApiKeyInput.value.trim()) return true;
+  openaiKeyConfig.hidden = false;
+  openaiApiKeyInput.focus();
+  setNotice('error', 'OpenAI API key required', 'Enter an API key above to process this document. It will be used for this session only.');
+  return false;
+}
+
 function stopOpenAICamera(showPlaceholder = true) {
   openaiCameraStream?.getTracks().forEach((track) => track.stop());
   openaiCameraStream = null;
@@ -253,6 +273,7 @@ function stopOpenAICamera(showPlaceholder = true) {
 }
 
 async function startOpenAICamera() {
+  if (!hasOpenAICredentials()) return;
   nativeCameraButton.hidden = true;
   if (!window.isSecureContext) {
     nativeCameraButton.hidden = false;
@@ -381,6 +402,7 @@ function selectProvider(provider) {
       setNotice('error', 'Document reader needs a license', 'Add VITE_REGULA_LICENSE to a local .env file, or configure domain licensing for this host.');
     }
   }
+  updateApiKeyVisibility();
 }
 
 function closeReader() {
@@ -514,6 +536,8 @@ async function loadOpenAIPricing() {
     const response = await fetch('/api/openai-pricing');
     if (!response.ok) return;
     openaiPricing = await response.json();
+    serverApiKeyConfigured = Boolean(openaiPricing.apiKeyConfigured);
+    updateApiKeyVisibility();
     if (activeProvider === 'openai') renderUsageSummary();
   } catch {
     openaiPricing = null;
@@ -549,6 +573,7 @@ function fileToDataUrl(file) {
 
 async function processWithOpenAI(file) {
   if (!file) return;
+  if (!hasOpenAICredentials()) return;
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
     setNotice('error', 'Unsupported file type', 'OpenAI mode accepts JPG, PNG, or WebP images.');
     return;
@@ -571,7 +596,10 @@ async function processWithOpenAI(file) {
     try {
       response = await fetch('/api/openai-ocr', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(serverApiKeyConfigured ? {} : { 'X-OpenAI-API-Key': openaiApiKeyInput.value.trim() }),
+        },
         body: JSON.stringify({ imageDataUrl }),
       });
     } catch {
@@ -659,7 +687,9 @@ providerOptions.forEach((option) => {
 });
 
 reopenReaderButton.addEventListener('click', () => {
-  if (activeProvider === 'openai') openaiFileInput.click();
+  if (activeProvider === 'openai') {
+    if (hasOpenAICredentials()) openaiFileInput.click();
+  }
   else openReader();
 });
 
@@ -667,7 +697,7 @@ changeDocumentButton.addEventListener('click', () => {
   clearDocumentPreview();
   if (activeProvider === 'openai') {
     readerPlaceholder.hidden = false;
-    openaiFileInput.click();
+    if (hasOpenAICredentials()) openaiFileInput.click();
   } else {
     openReader();
   }
@@ -709,5 +739,6 @@ startOverButton.addEventListener('click', () => {
   }
 });
 
+selectProvider('openai');
 initializeReader();
 loadOpenAIPricing();
