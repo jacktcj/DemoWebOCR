@@ -25,4 +25,4 @@ The Regula camera flow requires HTTPS in production. `localhost` is treated as a
 - Each successful OpenAI scan displays input, output, and total tokens plus that process's estimated price in MYR and USD, formatted to four decimal places. The example configuration contains the standard GPT-5.6 Luna token rates and a dated USD/MYR reference rate; review both when pricing changes.
 - Extracted fields remain editable so the user can correct OCR results before confirming.
 - Real Regula license values are excluded by `.gitignore` and should never be committed.
-- OpenAI keys are never bundled into client code or saved in browser storage. When `OPENAI_API_KEY` is missing on the server, OpenAI mode displays a password field for a session-only key and sends it to the same-origin OCR endpoint with each request. For production, configure `OPENAI_API_KEY` on the server instead.
+- OpenAI and Regula modes provide optional session-only key fields. A typed key overrides the corresponding project setting for the next request; leaving it blank uses `OPENAI_API_KEY` or `VITE_REGULA_LICENSE`. Manual keys remain in page memory only and are not saved in browser storage.
