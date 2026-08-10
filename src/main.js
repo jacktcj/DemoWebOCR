@@ -786,7 +786,11 @@ async function initializeReader(licenseOverride = '', updateChooser = true) {
   const configuredLicense = import.meta.env.VITE_REGULA_LICENSE?.trim() || '';
   const license = licenseOverride.trim() || configuredLicense;
   try {
-    window.RegulaDocumentSDK?.shutdown?.();
+    try {
+      window.RegulaDocumentSDK?.shutdown?.();
+    } catch {
+      // A failed or partial initialization may not have a running worker to shut down.
+    }
     window.RegulaDocumentSDK = new DocumentReaderService();
     const processOptions = { processParam: { scenario: 'FullProcess' } };
     window.RegulaDocumentSDK.recognizerProcessParam = processOptions;
